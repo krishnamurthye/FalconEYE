@@ -3,45 +3,20 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Callable
-import re
 import time
 
 from ...domain.models.security import SecurityReview, SecurityFinding
 from ...domain.services.security_analyzer import SecurityAnalyzer
 from ...domain.services.context_assembler import ContextAssembler
 from ...domain.services.memory_service import MemoryService
+from ...domain.services.content_sanitizer import sanitize_untrusted_text
 from ...infrastructure.logging import FalconEyeLogger
 
 
-def _sanitize_memory_content(text: str) -> str:
-    """Sanitize recalled memory content to mitigate prompt injection.
-
-    SAGE memories can originate from any scan and get recalled by
-    semantic similarity across projects. A malicious repo could seed
-    adversarial instructions that flow into future scans' prompts.
-
-    This function:
-    - Strips control characters (except newlines/tabs)
-    - Removes role-switch sequences (e.g. "system:", "assistant:", "user:")
-    - Truncates excessively long entries
-    """
-    # Strip control characters except newline and tab
-    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
-    # Remove common role-switch / prompt injection sequences
-    text = re.sub(
-        r'(?i)^(system|assistant|user|human|ai)\s*:', '', text, flags=re.MULTILINE
-    )
-    # Remove XML-style role tags
-    text = re.sub(r'(?i)</?(?:system|assistant|user|human|instruction)[^>]*>', '', text)
-    # Remove natural-language imperative injection attempts
-    text = re.sub(
-        r'(?i)^(ignore|disregard|forget|override|instead|do not follow|skip|bypass)\b[^\n]{0,200}',
-        '', text, flags=re.MULTILINE,
-    )
-    # Truncate individual entries to a reasonable length
-    if len(text) > 500:
-        text = text[:500] + "..."
-    return text.strip()
+# Retained as a private alias for backward compatibility with any existing
+# tests/importers. The canonical implementation now lives in
+# domain.services.content_sanitizer.
+_sanitize_memory_content = sanitize_untrusted_text
 
 
 @dataclass

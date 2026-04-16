@@ -138,7 +138,7 @@ def review(
     ),
     output_format: Optional[str] = typer.Option(
         None,
-        "--output", "-o",
+        "--format", "--output", "-o",
         help="Output format (console, json, sarif, html)",
     ),
     output_file: Optional[Path] = typer.Option(
@@ -149,7 +149,13 @@ def review(
     severity: Optional[str] = typer.Option(
         None,
         "--severity",
-        help="Minimum severity to report (critical, high, medium, low)",
+        help="Minimum severity to report (critical, high, medium, low, info)",
+    ),
+    fail_on: Optional[str] = typer.Option(
+        None,
+        "--fail-on",
+        help="Exit with code 1 if any finding at or above this severity is "
+             "present (critical, high, medium, low, info). Useful for CI gating.",
     ),
     config: Optional[str] = typer.Option(
         None,
@@ -190,6 +196,7 @@ def review(
         output_format=output_format,
         output_file=output_file,
         severity=severity,
+        fail_on=fail_on,
         config_path=config,
         verbose=verbose,
         backend=backend,
@@ -217,13 +224,24 @@ def scan(
     ),
     output_format: Optional[str] = typer.Option(
         None,
-        "--output", "-o",
+        "--format", "--output", "-o",
         help="Output format (console, json, sarif, html)",
     ),
     output_file: Optional[Path] = typer.Option(
         None,
         "--output-file",
         help="Save results to file",
+    ),
+    severity: Optional[str] = typer.Option(
+        None,
+        "--severity",
+        help="Minimum severity to report (critical, high, medium, low, info)",
+    ),
+    fail_on: Optional[str] = typer.Option(
+        None,
+        "--fail-on",
+        help="Exit with code 1 if any finding at or above this severity is "
+             "present (critical, high, medium, low, info). Useful for CI gating.",
     ),
     project_id: Optional[str] = typer.Option(
         None,
@@ -294,6 +312,8 @@ def scan(
         backend=backend,
         sage=sage,
         console=console,
+        severity=severity,
+        fail_on=fail_on,
     )
 
 

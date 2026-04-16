@@ -20,6 +20,11 @@ from ...application.commands.index_codebase import IndexCodebaseCommand
 from ...application.commands.review_file import ReviewFileCommand
 from ..formatters.formatter_factory import FormatterFactory
 from ...domain.models.security import SecurityFinding, Severity, FindingConfidence
+from ...domain.services.severity_filter import (
+    SEVERITY_RANK as _SEVERITY_RANK,
+    filter_findings_by_min_severity as _filter_findings_by_min_severity,
+    parse_severity_threshold as _parse_severity_threshold,
+)
 
 
 def _format_finding_brief(finding: SecurityFinding, console: Console, finding_number: int) -> None:
@@ -270,20 +275,11 @@ def index_command(
         extensions = language_detector.LANGUAGE_EXTENSIONS.get(lang, [])
         for ext in extensions:
             files.extend(list(path.rglob(f"*{ext}")))
-    
-    # Filter excluded patterns
-    filtered_files = []
-    for file_path in files:
-        should_exclude = False
-        relative_path = str(file_path.relative_to(path))
-        for pattern in exclude:
-            pattern_clean = pattern.replace("**", "").replace("*", "")
-            if pattern_clean in relative_path or pattern_clean in str(file_path):
-                should_exclude = True
-                break
-        if not should_exclude:
-            filtered_files.append(file_path)
-    
+
+    # Filter excluded patterns via the shared matcher (glob + legacy substring)
+    from ...domain.services.file_exclusion import filter_excluded
+    filtered_files = filter_excluded(files, path, exclude)
+
     total_files = len(filtered_files)
     
     # Track progress
@@ -401,6 +397,7 @@ def review_command(
     backend: Optional[str] = None,
     sage: bool = False,
     console: Console = None,
+    fail_on: Optional[str] = None,
 ):
     """
     Execute review command.
@@ -412,12 +409,14 @@ def review_command(
         top_k: Context count
         output_format: Output format
         output_file: Output file
-        severity: Minimum severity
+        severity: Minimum severity to report (filters findings below)
         config_path: Config file path
         verbose: Verbose output
         backend: LLM backend override
         sage: Enable SAGE persistent memory
         console: Rich console
+        fail_on: Minimum severity that triggers a non-zero exit code (CI gate).
+            Independent of --severity; findings are still written to reports.
     """
     if verbose:
         console.print(Panel.fit(
@@ -934,6 +933,32 @@ def review_command(
                     console.print(f"\n{error_msg}")
                     raise SystemExit(1)
 
+    # Apply --severity minimum-severity filter (if supplied).
+    # Validation happens at the CLI boundary; invalid values exit non-zero.
+    try:
+        min_severity = _parse_severity_threshold(severity)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(2)
+
+    if min_severity is not None:
+        original_count = len(review.findings)
+        review.findings = _filter_findings_by_min_severity(review.findings, min_severity)
+        filtered_out = original_count - len(review.findings)
+        if filtered_out > 0:
+            console.print(
+                f"[dim]Filtered out {filtered_out} finding(s) below "
+                f"{min_severity.value} severity[/dim]"
+            )
+
+    # Apply --fail-on CI gate (also evaluated against post-filter findings so
+    # --severity info --fail-on high still gates on the right set).
+    try:
+        fail_on_severity = _parse_severity_threshold(fail_on)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(2)
+
     # Format output
     formatter = FormatterFactory.create(
         output_format,
@@ -976,6 +1001,19 @@ def review_command(
         console.print("")
         console.print(output)
 
+    # --fail-on CI gate: exit non-zero if any finding is at or above the
+    # supplied threshold. Runs after display so the user still sees results.
+    if fail_on_severity is not None:
+        gate_findings = _filter_findings_by_min_severity(
+            review.findings, fail_on_severity
+        )
+        if gate_findings:
+            console.print(
+                f"\n[red]Fail-on gate triggered: {len(gate_findings)} finding(s) "
+                f"at or above {fail_on_severity.value} severity[/red]"
+            )
+            raise SystemExit(1)
+
 
 def scan_command(
     path: Path,
@@ -990,6 +1028,8 @@ def scan_command(
     backend: Optional[str] = None,
     sage: bool = False,
     console: Console = None,
+    severity: Optional[str] = None,
+    fail_on: Optional[str] = None,
 ):
     """
     Execute scan command (index + review).
@@ -1007,6 +1047,8 @@ def scan_command(
         backend: LLM backend override
         sage: Enable SAGE persistent memory
         console: Rich console
+        severity: Minimum severity to report (passed through to review)
+        fail_on: Minimum severity that triggers non-zero exit (CI gate)
     """
     console.print(Panel.fit(
         "[bold]FalconEYE Full Scan[/bold]",
@@ -1038,7 +1080,8 @@ def scan_command(
         top_k=None,
         output_format=output_format,
         output_file=output_file,
-        severity=None,
+        severity=severity,
+        fail_on=fail_on,
         config_path=config_path,
         verbose=verbose,
         backend=backend,

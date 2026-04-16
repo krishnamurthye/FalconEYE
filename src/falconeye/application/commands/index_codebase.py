@@ -16,6 +16,7 @@ from ...domain.repositories.vector_store_repository import VectorStoreRepository
 from ...domain.repositories.metadata_repository import MetadataRepository
 from ...domain.repositories.index_registry import IndexRegistryRepository
 from ...domain.value_objects.project_metadata import ProjectMetadata, FileMetadata, FileStatus
+from ...domain.services.file_exclusion import filter_excluded
 from ...infrastructure.ast.ast_analyzer import EnhancedASTAnalyzer
 from ...infrastructure.logging import FalconEyeLogger
 
@@ -596,23 +597,9 @@ class IndexCodebaseHandler:
         # Remove duplicates (in case of overlapping extensions)
         files = list(set(files))
 
-        # Filter excluded patterns
-        filtered_files = []
-        for file_path in files:
-            should_exclude = False
-            relative_path = str(file_path.relative_to(root_path))
-
-            for pattern in excluded_patterns:
-                # Simple pattern matching (can be enhanced)
-                pattern_clean = pattern.replace("**", "").replace("*", "")
-                if pattern_clean in relative_path or pattern_clean in str(file_path):
-                    should_exclude = True
-                    break
-
-            if not should_exclude:
-                filtered_files.append(file_path)
-
-        return filtered_files
+        # Filter excluded patterns using the shared glob + substring matcher
+        # (see domain.services.file_exclusion for semantics).
+        return filter_excluded(files, root_path, excluded_patterns)
 
     def _chunk_content(
         self,
@@ -780,28 +767,11 @@ class IndexCodebaseHandler:
             found = list(root_path.rglob(pattern))
             doc_files.extend(found)
 
-        # Remove duplicates
-        doc_files = list(set(doc_files))
+        # Remove duplicates and drop non-files
+        doc_files = [p for p in set(doc_files) if p.is_file()]
 
-        # Filter excluded patterns and non-files
-        filtered_docs = []
-        for doc_path in doc_files:
-            if not doc_path.is_file():
-                continue
-
-            should_exclude = False
-            relative_path = str(doc_path.relative_to(root_path))
-
-            for pattern in excluded_patterns:
-                pattern_clean = pattern.replace("**", "").replace("*", "")
-                if pattern_clean in relative_path or pattern_clean in str(doc_path):
-                    should_exclude = True
-                    break
-
-            if not should_exclude:
-                filtered_docs.append(doc_path)
-
-        return filtered_docs
+        # Filter excluded patterns using the shared glob + substring matcher.
+        return filter_excluded(doc_files, root_path, excluded_patterns)
 
     async def _process_document(
         self,

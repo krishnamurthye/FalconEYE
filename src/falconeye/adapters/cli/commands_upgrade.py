@@ -64,9 +64,15 @@ def _get_remote_version(repo_root: Path) -> Optional[str]:
     return None
 
 
-def _run_git_pull(repo_root: Path, console: Console) -> tuple[bool, str]:
+def _run_git_pull(repo_root: Path, console: Console) -> tuple[bool, str, str]:
     """
-    Run git fetch + pull and return (changed: bool, output: str).
+    Run git fetch + pull.
+
+    Returns a 3-tuple of:
+        changed: True when the pull brought new commits.
+        pull_output: Human-readable stdout from ``git pull``.
+        incoming_commits: ``git log HEAD..origin/main --oneline`` output
+            captured before the pull ran, for reporting purposes.
     """
     # First fetch to get remote state
     fetch_result = subprocess.run(

@@ -165,7 +165,7 @@ falconeye review /path/to/your/project    # Analyze for vulnerabilities
 falconeye scan /path/to/your/project --backend mlx
 
 # Generate an HTML report
-falconeye scan /path/to/your/project --format html --output report.html
+falconeye scan /path/to/your/project --format html --output-file report.html
 
 # Verbose mode -- see LLM streaming and full logs
 falconeye scan /path/to/your/project -v
@@ -292,11 +292,12 @@ Each language has a dedicated plugin with tailored security prompts, vulnerabili
 | `--verbose` | `-v` | Detailed output with LLM streaming and full logs |
 | `--language` | `-l` | Programming language (auto-detected if omitted) |
 | `--config` | `-c` | Path to configuration file |
-| `--format` | `-o` | Output format: `console`, `json`, `html`, `sarif` |
+| `--format` / `--output` | `-o` | Output format: `console`, `json`, `html`, `sarif` |
 | `--output-file` | | Save results to a specific file |
 | `--validate` | | Enable AI validation pass to reduce false positives |
 | `--top-k` | | Number of similar code chunks for RAG context (default: 5) |
-| `--severity` | | Minimum severity to report: `critical`, `high`, `medium`, `low` |
+| `--severity` | | Minimum severity to report: `critical`, `high`, `medium`, `low`, `info` |
+| `--fail-on` | | Exit non-zero when a finding at or above the given severity exists (CI gate) |
 | `--force-reindex` | | Force re-index all files (ignore cache) |
 | `--exclude` | `-e` | Glob patterns to exclude (repeatable) |
 
@@ -307,7 +308,7 @@ Each language has a dedicated plugin with tailored security prompts, vulnerabili
 falconeye scan ./src --backend mlx
 
 # Review with AI validation and HTML output
-falconeye review ./src --validate --format html --output report.html
+falconeye review ./src --validate --format html --output-file report.html
 
 # Scan with verbose output (see LLM reasoning in real-time)
 falconeye scan ./src -v
@@ -315,8 +316,11 @@ falconeye scan ./src -v
 # Filter findings by severity
 falconeye review ./src --severity high
 
+# Fail CI when any high-or-critical finding is detected
+falconeye review ./src --fail-on high
+
 # SARIF output for CI/CD integration
-falconeye review ./src --format sarif --output results.sarif
+falconeye review ./src --format sarif --output-file results.sarif
 
 # Force re-index and scan
 falconeye scan ./src --force-reindex

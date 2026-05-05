@@ -2,7 +2,13 @@
 
 from pathlib import Path
 from typing import List
-import tree_sitter_language_pack
+import ast
+import re
+
+try:
+    import tree_sitter_language_pack
+except ModuleNotFoundError:  # pragma: no cover - exercised by fallback tests
+    tree_sitter_language_pack = None
 
 from ...domain.models.structural import (
     StructuralMetadata,
@@ -12,6 +18,7 @@ from ...domain.models.structural import (
     ClassInfo,
     ControlFlowNode,
 )
+from ..logging import FalconEyeLogger
 
 
 class EnhancedASTAnalyzer:
@@ -53,17 +60,27 @@ class EnhancedASTAnalyzer:
 
     def __init__(self):
         """Initialize AST analyzer."""
+        self.logger = FalconEyeLogger.get_instance()
         self.parsers = {}
         self._init_parsers()
 
     def _init_parsers(self):
         """Initialize Tree-sitter parsers for supported languages."""
+        if tree_sitter_language_pack is None:
+            self.logger.warning(
+                "tree_sitter_language_pack not available; AST analysis will use "
+                "best-effort regex/Python fallback with degraded language coverage"
+            )
+            return
         for lang in set(self.LANGUAGE_MAP.values()):
             try:
                 parser = tree_sitter_language_pack.get_parser(lang)
                 self.parsers[lang] = parser
             except Exception as e:
-                print(f"Warning: Could not initialize parser for {lang}: {e}")
+                self.logger.warning(
+                    "Could not initialize tree-sitter parser; using fallback when available",
+                    extra={"language": lang, "error": str(e)},
+                )
 
     def analyze_file(
         self,
@@ -84,12 +101,15 @@ class EnhancedASTAnalyzer:
         ext = Path(file_path).suffix.lower()
         language = self.LANGUAGE_MAP.get(ext)
 
-        if not language or language not in self.parsers:
+        if not language:
             # Return empty metadata for unsupported languages
             return StructuralMetadata(
                 file_path=file_path,
-                language=language or "unknown"
+                language="unknown"
             )
+
+        if language not in self.parsers:
+            return self._analyze_with_fallback(file_path, content, language)
 
         # Parse code
         parser = self.parsers[language]
@@ -123,6 +143,85 @@ class EnhancedASTAnalyzer:
             self._analyze_csharp(root, content, metadata)
 
         return metadata
+
+    def _analyze_with_fallback(self, file_path: str, content: str, language: str) -> StructuralMetadata:
+        """Best-effort structural extraction when tree-sitter is unavailable.
+
+        Fallback coverage is intentionally partial: Python, JavaScript/TypeScript,
+        and Go get lightweight imports/functions/classes extraction. Other
+        tree-sitter-supported languages return empty metadata rather than failing
+        the scan.
+        """
+        metadata = StructuralMetadata(file_path=file_path, language=language)
+        if language == "python":
+            self._fallback_python(content, metadata)
+        elif language in {"javascript", "typescript"}:
+            self._fallback_javascript(content, metadata)
+        elif language == "go":
+            self._fallback_go(content, metadata)
+        return metadata
+
+    def _fallback_python(self, content: str, metadata: StructuralMetadata):
+        try:
+            tree = ast.parse(content)
+        except (SyntaxError, ValueError, TypeError):
+            return
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                metadata.functions.append(FunctionInfo(
+                    name=node.name,
+                    line=node.lineno,
+                    parameters=[arg.arg for arg in node.args.args],
+                    is_async=isinstance(node, ast.AsyncFunctionDef),
+                ))
+            elif isinstance(node, ast.ClassDef):
+                metadata.classes.append(ClassInfo(name=node.name, line=node.lineno))
+            elif isinstance(node, ast.Import):
+                stmt = "import " + ", ".join(alias.name for alias in node.names)
+                metadata.imports.append(ImportInfo(stmt, node.lineno, node.names[0].name.split(".")[0]))
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                stmt = f"from {'.' * node.level}{module} import " + ", ".join(alias.name for alias in node.names)
+                metadata.imports.append(ImportInfo(stmt, node.lineno, module.split(".")[0], is_relative=node.level > 0))
+            elif isinstance(node, ast.Call):
+                name = self._fallback_call_name(node.func)
+                if name:
+                    metadata.calls.append(CallInfo(function=name, line=getattr(node, "lineno", 1)))
+
+    def _fallback_call_name(self, node) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            base = self._fallback_call_name(node.value)
+            return f"{base}.{node.attr}" if base else node.attr
+        return ""
+
+    def _fallback_javascript(self, content: str, metadata: StructuralMetadata):
+        for match in re.finditer(r"^\s*import\s+[^;]+from\s+['\"]([^'\"]+)['\"]", content, re.M):
+            metadata.imports.append(ImportInfo(match.group(0), content[:match.start()].count("\n") + 1, match.group(1)))
+        for match in re.finditer(r"\b(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", content):
+            metadata.functions.append(FunctionInfo(
+                match.group(1),
+                content[:match.start()].count("\n") + 1,
+                is_async=match.group(0).lstrip().startswith("async"),
+            ))
+        for match in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>", content):
+            metadata.functions.append(FunctionInfo(match.group(1), content[:match.start()].count("\n") + 1))
+        for match in re.finditer(r"\bclass\s+([A-Za-z_$][\w$]*)\b", content):
+            metadata.classes.append(ClassInfo(match.group(1), content[:match.start()].count("\n") + 1))
+
+    def _fallback_go(self, content: str, metadata: StructuralMetadata):
+        for match in re.finditer(r"^\s*import\s+[\"]([^\"]+)[\"]", content, re.M):
+            metadata.imports.append(ImportInfo(match.group(0), content[:match.start()].count("\n") + 1, match.group(1)))
+        for block in re.finditer(r"^\s*import\s*\((.*?)^\s*\)", content, re.M | re.S):
+            block_start_line = content[:block.start()].count("\n") + 1
+            for match in re.finditer(r"[\"]([^\"]+)[\"]", block.group(1)):
+                line = block_start_line + block.group(1)[:match.start()].count("\n")
+                metadata.imports.append(ImportInfo(match.group(0), line, match.group(1)))
+        for match in re.finditer(r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(", content, re.M):
+            metadata.functions.append(FunctionInfo(match.group(1), content[:match.start()].count("\n") + 1))
+        for match in re.finditer(r"^\s*type\s+([A-Za-z_]\w*)\s+struct\b", content, re.M):
+            metadata.classes.append(ClassInfo(match.group(1), content[:match.start()].count("\n") + 1))
 
     def _analyze_python(self, root, content: str, metadata: StructuralMetadata):
         """Analyze Python code."""

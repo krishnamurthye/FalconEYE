@@ -205,11 +205,20 @@ class ContextAssembler:
                 query_embedding=query_embedding,
             )
 
-            # Filter out chunks from the current file
-            filtered_chunks = [
-                chunk for chunk in similar_chunks
-                if chunk.metadata.file_path != current_file
-            ][:top_k]
+            # Filter out chunks from the current file and deduplicate repeated
+            # vector hits so the prompt is not flooded with identical context.
+            filtered_chunks = []
+            seen_chunks = set()
+            for chunk in similar_chunks:
+                if chunk.metadata.file_path == current_file:
+                    continue
+                dedupe_key = (chunk.metadata.file_path, chunk.content)
+                if dedupe_key in seen_chunks:
+                    continue
+                seen_chunks.add(dedupe_key)
+                filtered_chunks.append(chunk)
+                if len(filtered_chunks) >= top_k:
+                    break
 
             if not filtered_chunks:
                 return None

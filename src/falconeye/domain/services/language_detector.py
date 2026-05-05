@@ -72,15 +72,20 @@ class LanguageDetector:
                 )
             return force_language
 
-        # If single file, detect from extension
+        # If single file, detect from extension first, then shebang for extensionless scripts
         if codebase_path.is_file():
             extension = codebase_path.suffix.lower()
             language = self.EXTENSION_TO_LANGUAGE.get(extension)
-            if not language:
-                raise LanguageDetectionError(
-                    f"Unsupported file type: {extension}"
-                )
-            return language
+            if language:
+                return language
+
+            shebang_language = self._detect_from_shebang(codebase_path)
+            if shebang_language:
+                return shebang_language
+
+            raise LanguageDetectionError(
+                f"Unsupported file type: {extension}"
+            )
 
         # Count files by language (for directories)
         language_counts = self._count_files_by_language(codebase_path)
@@ -94,6 +99,35 @@ class LanguageDetector:
         primary_language = self._determine_primary_language(language_counts)
 
         return primary_language
+
+    def _detect_from_shebang(self, file_path: Path) -> Optional[str]:
+        """Detect language from a Unix shebang for extensionless scripts."""
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as handle:
+                first_line = handle.readline(256).strip().lower()
+        except (OSError, UnicodeError):
+            return None
+
+        if not first_line.startswith("#!"):
+            return None
+
+        command = first_line[2:].strip().split()
+        if not command:
+            return None
+
+        executable = Path(command[0]).name
+        if executable == "env" and len(command) > 1:
+            executable = Path(command[1]).name
+
+        shebang_map = {
+            "python": "python",
+            "python3": "python",
+            "node": "javascript",
+            "nodejs": "javascript",
+            "ruby": "ruby",
+            "php": "php",
+        }
+        return shebang_map.get(executable)
 
     def _count_files_by_language(self, root_path: Path) -> Dict[str, int]:
         """

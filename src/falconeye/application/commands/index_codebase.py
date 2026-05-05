@@ -1,5 +1,7 @@
 """Index codebase command and handler."""
 
+import asyncio
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -221,23 +223,35 @@ class IndexCodebaseHandler:
             excluded_patterns=command.excluded_patterns or [],
         )
 
-        # Step 8: Process code files
-        processed_files = []
-        for file_path in files_to_process:
-            # Detect language for each file individually
-            try:
-                file_language = self.language_detector.detect_language(file_path)
-            except Exception:
-                # Fallback to primary language if detection fails
-                file_language = language
-            
-            file_meta = await self._process_file(
-                file_path, file_language, command, codebase, project_id
-            )
-            if file_meta:
-                processed_files.append(file_meta)
+        # Step 8: Process code files in parallel.
+        #
+        # Each file is independent — read, chunk, embed, store — so we can run
+        # multiple files concurrently and keep the embedding model busy. The
+        # per-file work already calls `generate_embeddings_batch` with one
+        # file's chunks; this just lets many of those batches fly in parallel.
+        # Concurrency is capped via FALCONEYE_INDEX_CONCURRENCY (default 8) so
+        # we don't overwhelm the embedding backend or vector store.
+        index_concurrency = int(
+            os.environ.get("FALCONEYE_INDEX_CONCURRENCY", "8")
+        )
+        semaphore = asyncio.Semaphore(index_concurrency)
 
-        # Step 9: Process documents if enabled
+        async def _process_one_file(file_path: Path) -> Optional[FileMetadata]:
+            async with semaphore:
+                try:
+                    file_language = self.language_detector.detect_language(file_path)
+                except Exception:
+                    file_language = language
+                return await self._process_file(
+                    file_path, file_language, command, codebase, project_id
+                )
+
+        file_results = await asyncio.gather(
+            *[_process_one_file(fp) for fp in files_to_process]
+        )
+        processed_files = [meta for meta in file_results if meta is not None]
+
+        # Step 9: Process documents if enabled — same parallelisation as files.
         doc_count = 0
         if command.include_documents:
             doc_files = self._discover_documents(command.codebase_path, command.excluded_patterns or [])
@@ -247,9 +261,12 @@ class IndexCodebaseHandler:
                 extra={"documents_found": len(doc_files)}
             )
 
-            for doc_path in doc_files:
-                await self._process_document(doc_path, command)
-                doc_count += 1
+            async def _process_one_doc(doc_path: Path) -> None:
+                async with semaphore:
+                    await self._process_document(doc_path, command)
+
+            await asyncio.gather(*[_process_one_doc(p) for p in doc_files])
+            doc_count = len(doc_files)
 
         # Step 10: Update project metadata in registry
         # Detect all languages for metadata

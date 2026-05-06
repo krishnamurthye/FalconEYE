@@ -1,6 +1,7 @@
 """MLX LLM adapter for Apple Silicon local inference."""
 
 import asyncio
+import os
 import platform
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -206,7 +207,9 @@ class MLXLLMAdapter(LLMService):
 
     # embeddinggemma:300m and similar small embedding models have a ~2048 token
     # context window (~8192 chars at 4 chars/token). Truncate before sending.
-    _MAX_EMBEDDING_CHARS: int = 8000
+    # Override the initial cap with FALCONEYE_MAX_EMBEDDING_CHARS for models
+    # with a known smaller window (e.g. set 6000 for 2048-token models).
+    _MAX_EMBEDDING_CHARS: int = int(os.environ.get("FALCONEYE_MAX_EMBEDDING_CHARS", "8000"))
     _MIN_EMBEDDING_CHARS: int = 512
 
     def _truncate_embedding_text(self, text: str, limit: int) -> str:
